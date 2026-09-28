@@ -19,7 +19,7 @@ final class Settings {
         set { d.set(newValue, forKey: "videoOn") }
     }
     var videoWidth: Int {
-        get { return Int(num("videoWidth", 1280)) }
+        get { return Int(num("videoWidth", 900)) }
         set { d.set(newValue, forKey: "videoWidth") }
     }
     var videoQuality: Int {

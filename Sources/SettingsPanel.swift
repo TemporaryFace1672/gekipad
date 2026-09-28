@@ -97,7 +97,7 @@ final class SettingsPanel: UIView {
     private func buildRows() {
         section("Video")
         switchRow("Show game picture", s.videoOn) { [weak self] on in self?.onVideoSwitch?(on) }
-        sliderRow("Picture width", min: 640, max: 1280, step: 40, value: Float(s.videoWidth),
+        sliderRow("Picture width", min: 480, max: 1080, step: 40, value: Float(s.videoWidth),
                   format: { "\(Int($0)) px" }, commitsVideo: true) { [weak self] v in self?.s.videoWidth = Int(v) }
         sliderRow("Picture quality", min: 40, max: 90, step: 5, value: Float(s.videoQuality),
                   format: { "\(Int($0))" }, commitsVideo: true) { [weak self] v in self?.s.videoQuality = Int(v) }

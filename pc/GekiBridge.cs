@@ -135,7 +135,10 @@ namespace GekiBridgeApp
         public uint magic;
         public byte version;
         public short lever;
-        public byte leftBtn, rightBtn, opBtn, coinHeld, cardScan;
+        // "reserved" used to be coin: confirmed (via segatools' mu3hook source) that coin is NOT part of mu3io.h at
+        // all - it's a separate, always-on io4-board keyboard hook - so it's injected directly below instead
+        // (Program.PollCoin), the same way this project's maimai bridge does it, and this byte is left unused.
+        public byte leftBtn, rightBtn, opBtn, reserved, cardScan;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 10)] public byte[] aimeLuid;
         public byte connected;
     }
@@ -369,12 +372,24 @@ namespace GekiBridgeApp
 
     static class Program
     {
+        [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+        [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+
         static string baseDir, logPath;
         static int usbPort = 24880;
-        static string windowTitle = "MU3";       // CONFIRM against the real game window title once installed
+        // Confirmed against a real ONGEKI ReFresh 1.51.00 install (segatools.ini/start.bat): exe is mu3.exe, hook
+        // is mu3hook.dll, [io4] coin=0x72 (F3) - same default as this project's maimai bridge, kept for consistency.
+        static string windowTitle = "mu3";
+        static int coinKey = 0x72;
+        static bool anyWindow = false, noKeys = false;
         static string deviceTcp = null;          // test hook: replaces usbmuxd with a direct TCP connection
+        static string aimeFile = "aime.txt";
         static byte[] aimeLuid = new byte[10];
         static readonly object logLock = new object();
+        static readonly object keyLock = new object();
+        static bool coinHeld = false;
         static SharedMem shared;
         static int clients = 0, msgCount = 0;
 
@@ -393,6 +408,10 @@ namespace GekiBridgeApp
                 string a = args[i].ToLowerInvariant();
                 if (a == "--usb-port" && i + 1 < args.Length) int.TryParse(args[++i], out usbPort);
                 else if (a == "--window" && i + 1 < args.Length) windowTitle = args[++i];
+                else if (a == "--coin-key" && i + 1 < args.Length) coinKey = Convert.ToInt32(args[++i], args[i].StartsWith("0x") ? 16 : 10);
+                else if (a == "--any-window") anyWindow = true;
+                else if (a == "--no-keys") noKeys = true;
+                else if (a == "--aime-file" && i + 1 < args.Length) aimeFile = args[++i];
                 else if (a == "--device-tcp" && i + 1 < args.Length) deviceTcp = args[++i];
             }
 
@@ -407,20 +426,59 @@ namespace GekiBridgeApp
             while (true) Thread.Sleep(1000);
         }
 
+        // aime.txt is 20 decimal digits (confirmed against djhackersdev/segatools' iccard/aime.c: the 10-byte luid
+        // is binary-coded decimal, i.e. each nibble is one of the 20 digits - NOT a hex string). Point --aime-file
+        // at your real segatools install's DEVICE\aime.txt to use your actual registered card.
         static void LoadAime()
         {
-            string f = Path.Combine(baseDir, "aime.txt");
-            string hex = null;
-            try { if (File.Exists(f)) hex = File.ReadAllText(f).Trim(); } catch { }
-            if (string.IsNullOrEmpty(hex) || hex.Length != 20)
+            string f = Path.IsPathRooted(aimeFile) ? aimeFile : Path.Combine(baseDir, aimeFile);
+            string digits = null;
+            try { if (File.Exists(f)) digits = File.ReadAllText(f).Trim(); } catch { }
+            if (string.IsNullOrEmpty(digits) || digits.Length != 20 || !IsAllDigits(digits))
             {
-                byte[] r = new byte[10]; new RNGCryptoServiceProvider().GetBytes(r);
-                r[0] = 0x01; // classic Aime cards conventionally start with 0x01 in the real header's examples
-                hex = BitConverter.ToString(r).Replace("-", "");
-                try { File.WriteAllText(f, hex); } catch { }
-                Log("generated a random Aime card id in aime.txt: " + hex);
+                Random rnd = new Random();
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 20; i++) sb.Append((char)('0' + rnd.Next(10)));
+                digits = sb.ToString();
+                try { File.WriteAllText(f, digits); } catch { }
+                Log("no valid 20-digit aime.txt found at " + f + " - generated a random one: " + digits +
+                    " (this card is NOT registered on any server; point --aime-file at your real DEVICE\\aime.txt instead)");
             }
-            for (int i = 0; i < 10; i++) aimeLuid[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+            else
+            {
+                Log("loaded Aime card id from " + f + ": " + digits);
+            }
+            for (int i = 0; i < 10; i++)
+                aimeLuid[i] = (byte)(((digits[i * 2] - '0') << 4) | (digits[i * 2 + 1] - '0'));
+        }
+
+        static bool IsAllDigits(string s)
+        {
+            foreach (char c in s) if (c < '0' || c > '9') return false;
+            return true;
+        }
+
+        // ---------- coin: not part of mu3io.h (see GekiIo.cpp header comment) - injected here instead, only while
+        // the game window is in front, exactly like this project's maimai bridge presses its coin key. ----------
+        static bool GameFocused()
+        {
+            if (anyWindow) return true;
+            StringBuilder sb = new StringBuilder(128);
+            GetWindowText(GetForegroundWindow(), sb, 128);
+            return sb.ToString().IndexOf(windowTitle, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        static void SetCoin(bool want)
+        {
+            if (noKeys) return;
+            lock (keyLock)
+            {
+                if (want == coinHeld) return;
+                if (want && !GameFocused()) return; // try again on the next message; never presses into another app
+                coinHeld = want;
+                byte vk = (byte)coinKey;
+                keybd_event(vk, (byte)MapVirtualKey(vk, 0), want ? 0u : 2u, UIntPtr.Zero);
+            }
         }
 
         static List<bool> Bits(string s, int n)
@@ -458,10 +516,10 @@ namespace GekiBridgeApp
                 byte op = 0;
                 if (b[0]) op |= 0x01; // test
                 if (b[1]) op |= 0x02; // service
-                byte coin = (byte)(b[2] ? 1 : 0);
                 byte card = (byte)(b[3] ? 1 : 0);
                 byte[] luid = aimeLuid;
-                shared.Update(box => { GekiPadShared s = box[0]; s.opBtn = op; s.coinHeld = coin; s.cardScan = card; s.aimeLuid = luid; box[0] = s; });
+                shared.Update(box => { GekiPadShared s = box[0]; s.opBtn = op; s.cardScan = card; s.aimeLuid = luid; box[0] = s; });
+                SetCoin(b[2]); // coin: not part of shared memory at all, see SetCoin
             }
             else if (k == 'V') vid.Configure(rest);
             else if (k == 'P') vid.SendControl("O" + rest);
@@ -501,9 +559,10 @@ namespace GekiBridgeApp
                 RunUsbSession(c);
                 shared.Update(box => {
                     GekiPadShared s = box[0];
-                    s.connected = 0; s.lever = 0; s.leftBtn = 0; s.rightBtn = 0; s.opBtn = 0; s.coinHeld = 0; s.cardScan = 0;
+                    s.connected = 0; s.lever = 0; s.leftBtn = 0; s.rightBtn = 0; s.opBtn = 0; s.cardScan = 0;
                     box[0] = s;
                 });
+                SetCoin(false);
                 Thread.Sleep(300);
             }
         }

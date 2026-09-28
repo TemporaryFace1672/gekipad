@@ -3,22 +3,26 @@
 // CHUNITHM: the DLL is loaded in-process by the game (via segatools' [mu3io]/[aimeio] path= config) and never talks
 // to the iPad itself; the bridge .exe owns the USB link and just writes into shared memory.
 //
-// Exact API verified against djhackersdev/segatools' mu3io.h and aimeio.h (fetched 2026-09-28):
-//   mu3_io_get_api_version / mu3_io_init / mu3_io_poll / mu3_io_get_opbtns / mu3_io_get_gamebtns / mu3_io_get_lever
-//   aime_io_get_api_version / aime_io_init / aime_io_nfc_poll / aime_io_nfc_get_aime_id /
-//   aime_io_nfc_get_felica_id / aime_io_led_set_color
-// Coin is NOT part of mu3io.h (confirmed - it's handled elsewhere in the segatools stack, commonly a keyboard key),
-// so this DLL injects a configurable key press instead, the same low-risk approach used for maimai/chuni.
+// Exact API verified against djhackersdev/segatools' mu3io.h and aimeio.h, and cross-checked against a real
+// ONGEKI ReFresh 1.51.00 install's segatools.ini/mu3.ini/start.bat (game=mu3.exe, hook=mu3hook.dll,
+// [mu3io]/[aimeio] path= are read exactly as implemented here; confirmed via mu3hook/mu3-dll.c that a non-empty
+// path= fully replaces the built-in mu3_io_* implementation, all five functions at once).
 //
-// NEEDS CONFIRMING against a real ONGEKI install (no test hardware/game available while writing this):
-//   - the exact [mu3io]/[aimeio]/hook ini section names for your segatools fork
-//   - the game's window title (WindowTitle= in gekipad.cfg; defaults to a guess)
-//   - the coin key your loader actually expects (CoinKey= in gekipad.cfg)
-//   - the Aime card ID format your setup wants (this DLL sends the classic 10-byte luid; FeliCa IDm is not sent)
+// Coin deliberately has NO code here: mu3io.h has no coin entry point, and mu3hook/io4.c shows coin/test/service
+// keyboard input is a *separate*, always-on io4-board-level hook (GetAsyncKeyState based) that isn't part of the
+// mu3io.h surface at all - so GekiBridge.exe injects the coin key directly, the same way this project's maimai
+// bridge does, rather than duplicating that logic in here.
+//
+// Aime card id format: confirmed via djhackersdev/segatools' iccard/aime.c (aime_card_populate) that the 10-byte
+// luid is BCD (each nibble a decimal digit 0-9) - i.e. the 20 decimal digits from aime.txt packed two per byte,
+// NOT hex. A real aime.txt was checked ("89013861175251191402") and packs cleanly this way.
+//
+// STILL NEEDS CONFIRMING live: whether the game actually reads test/service through mu3_io_get_opbtns once this
+// DLL is active (should, per mu3-dll.c, but wasn't observable without the game running), and the exact lever
+// range/centre the game's own calibration screen expects.
 
 #include <windows.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 #ifndef S_OK
@@ -28,7 +32,7 @@
 #define S_FALSE ((HRESULT)1L)
 #endif
 
-// ---- mu3io.h (inlined; see comment above for source) ----
+// ---- mu3io.h (inlined; see header comment for source) ----
 enum {
     MU3_IO_OPBTN_TEST = 0x01,
     MU3_IO_OPBTN_SERVICE = 0x02,
@@ -48,10 +52,10 @@ struct GekiPadShared {
     int16_t  lever;        // -32768..32767, 0 = centre
     uint8_t  leftBtn;       // MU3_IO_GAMEBTN_* bits
     uint8_t  rightBtn;
-    uint8_t  opBtn;         // MU3_IO_OPBTN_* bits (test/service)
-    uint8_t  coinHeld;      // 1 while the iPad's COIN button is held
+    uint8_t  opBtn;         // MU3_IO_OPBTN_* bits (test/service - NOT coin, see header comment)
+    uint8_t  reserved;      // was coin; kept so the struct layout matches GekiBridge.exe's copy exactly
     uint8_t  cardScan;      // 1 while the iPad's CARD button is held
-    uint8_t  aimeLuid[10];  // classic Aime card id, valid while cardScan = 1
+    uint8_t  aimeLuid[10];  // classic Aime card id (BCD), valid while cardScan = 1
     uint8_t  connected;     // 1 while the bridge has an iPad linked
 };
 #pragma pack(pop)
@@ -64,41 +68,11 @@ static GekiPadShared *g_shared = NULL;
 static CRITICAL_SECTION g_lock;
 static bool g_lockInit = false;
 
-static wchar_t g_windowTitle[128] = L"MU3"; // confirm against the real game window title
-static int g_coinKey = 0x72;                 // VK_F3, matches the maimai coin key convention
-static bool g_anyWindow = false;
-
-static HMODULE g_hModule = NULL;
-
-static void LoadConfig() {
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(g_hModule, path, MAX_PATH);
-    wchar_t *slash = wcsrchr(path, L'\\');
-    if (slash) *(slash + 1) = 0;
-    wcscat_s(path, MAX_PATH, L"gekipad.cfg");
-    FILE *f = _wfopen(path, L"r, ccs=UTF-8");
-    if (!f) return;
-    wchar_t line[256];
-    while (fgetws(line, 256, f)) {
-        wchar_t *eq = wcschr(line, L'=');
-        if (!eq) continue;
-        *eq = 0;
-        wchar_t *val = eq + 1;
-        size_t vlen = wcslen(val);
-        while (vlen > 0 && (val[vlen - 1] == L'\n' || val[vlen - 1] == L'\r' || val[vlen - 1] == L' ')) val[--vlen] = 0;
-        if (wcscmp(line, L"WindowTitle") == 0) wcsncpy_s(g_windowTitle, 128, val, _TRUNCATE);
-        else if (wcscmp(line, L"CoinKey") == 0) g_coinKey = wcstol(val, NULL, 0);
-        else if (wcscmp(line, L"AnyWindow") == 0) g_anyWindow = (wcscmp(val, L"1") == 0);
-    }
-    fclose(f);
-}
-
 static void EnsureShared() {
     if (g_shared) return;
     if (!g_lockInit) { InitializeCriticalSection(&g_lock); g_lockInit = true; }
     EnterCriticalSection(&g_lock);
     if (!g_shared) {
-        LoadConfig();
         g_map = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(GekiPadShared), kMapName);
         if (g_map) {
             g_shared = (GekiPadShared *)MapViewOfFile(g_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(GekiPadShared));
@@ -113,27 +87,6 @@ static void EnsureShared() {
     LeaveCriticalSection(&g_lock);
 }
 
-static bool GameFocused() {
-    if (g_anyWindow) return true;
-    HWND h = GetForegroundWindow();
-    wchar_t buf[128] = {0};
-    GetWindowTextW(h, buf, 128);
-    return wcsstr(buf, g_windowTitle) != NULL;
-}
-
-// Coin has no mu3io entry point, so we inject a key press instead - only while the game window is in front, so this
-// can never leak keystrokes into another application. Level-triggered on shared->coinHeld, like the other segatools
-// controllers in this project (maimai/chuni) that key-inject their coin button the same way.
-static void PollCoin() {
-    static bool held = false;
-    bool want = g_shared && g_shared->coinHeld != 0;
-    if (want == held) return;
-    if (want && !GameFocused()) return; // try again next poll; never presses into a background window
-    held = want;
-    BYTE vk = (BYTE)g_coinKey;
-    keybd_event(vk, (BYTE)MapVirtualKeyW(vk, 0), want ? 0 : KEYEVENTF_KEYUP, 0);
-}
-
 extern "C" {
 
 __declspec(dllexport) uint16_t mu3_io_get_api_version(void) { return 0x0100; }
@@ -145,7 +98,6 @@ __declspec(dllexport) HRESULT mu3_io_init(void) {
 
 __declspec(dllexport) HRESULT mu3_io_poll(void) {
     EnsureShared();
-    if (g_shared) PollCoin();
     return S_OK;
 }
 
@@ -183,7 +135,9 @@ __declspec(dllexport) HRESULT aime_io_nfc_get_aime_id(uint8_t unit_no, uint8_t *
 }
 
 __declspec(dllexport) HRESULT aime_io_nfc_get_felica_id(uint8_t unit_no, uint64_t *IDm) {
-    // Not implemented: this project only sends the classic 10-byte luid. Confirm which your card/setup needs.
+    // Not implemented: this project only sends the classic BCD luid. The real install checked uses a plain
+    // decimal aime.txt, which is the classic-card path, so this should not be needed - but flagging it in case
+    // your card/setup turns out to want a FeliCa IDm instead.
     (void)unit_no; (void)IDm;
     return S_FALSE;
 }
@@ -194,10 +148,7 @@ __declspec(dllexport) void aime_io_led_set_color(uint8_t unit_no, uint8_t r, uin
 
 } // extern "C"
 
-BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        g_hModule = (HMODULE)hinst;
-    }
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         if (g_shared) UnmapViewOfFile(g_shared);
         if (g_map) CloseHandle(g_map);

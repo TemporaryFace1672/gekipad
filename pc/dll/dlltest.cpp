@@ -10,7 +10,7 @@ struct GekiPadShared {
     uint32_t magic;
     uint8_t  version;
     int16_t  lever;
-    uint8_t  leftBtn, rightBtn, opBtn, coinHeld, cardScan;
+    uint8_t  leftBtn, rightBtn, opBtn, reserved, cardScan;
     uint8_t  aimeLuid[10];
     uint8_t  connected;
 };
@@ -43,8 +43,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 10; i++) sh->aimeLuid[i] = (uint8_t)(0xA0 + i);
     } else {
         printf("readonly mode: attached to existing shared memory, not writing test values\n");
-        printf("current: magic=0x%08x lever=%d left=0x%02x right=0x%02x op=0x%02x coin=%d card=%d connected=%d\n",
-            sh->magic, sh->lever, sh->leftBtn, sh->rightBtn, sh->opBtn, sh->coinHeld, sh->cardScan, sh->connected);
+        printf("current: magic=0x%08x lever=%d left=0x%02x right=0x%02x op=0x%02x card=%d connected=%d\n",
+            sh->magic, sh->lever, sh->leftBtn, sh->rightBtn, sh->opBtn, sh->cardScan, sh->connected);
     }
 
     HMODULE dll = LoadLibraryW(L"GekiIo.dll");
