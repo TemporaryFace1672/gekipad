@@ -1,0 +1,13 @@
+build/
+*.xcodeproj/
+*.ipa
+*.exe
+*.dll
+*.o
+*.log
+build.log
+dll/dlltest.exe
+GekiBridge.log
+aime.txt
+url.txt
+token.txt
