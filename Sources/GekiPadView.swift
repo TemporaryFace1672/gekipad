@@ -13,14 +13,21 @@ final class GekiPadView: UIView {
     private let settings = Settings.shared
     private let click = ClickPlayer()
 
-    // game button order: 0=btn1 1=btn2 2=btn3 3=side 4=menu (left), 5..9 same for right
+    // game button order: 0=btn1 1=btn2 2=btn3 3=side 4=menu (left), 5..9 same for right.
+    // Layout (per the reference sketch): SIDE = a tall bar at the outer edge of the screen; MENU = a small square
+    // flanking the lever directly; 1/2/3 = a horizontal row near the bottom, each cluster with a gap between them.
     private let gameLabels = ["1", "2", "3", "SIDE", "MENU", "1", "2", "3", "SIDE", "MENU"]
     private let gameColors: [UIColor] = [
-        UIColor(red: 1.0, green: 0.34, blue: 0.34, alpha: 1),   // btn1 red
-        UIColor(red: 0.36, green: 0.88, blue: 0.44, alpha: 1),  // btn2 green
-        UIColor(red: 0.35, green: 0.58, blue: 1.0, alpha: 1),   // btn3 blue
-        UIColor(red: 0.85, green: 0.85, blue: 0.9, alpha: 1),   // side
-        UIColor(red: 0.95, green: 0.8, blue: 0.25, alpha: 1)    // menu
+        UIColor(red: 1.0, green: 0.34, blue: 0.34, alpha: 1),   // 0 left btn1 red
+        UIColor(red: 0.36, green: 0.88, blue: 0.44, alpha: 1),  // 1 left btn2 green
+        UIColor(red: 0.35, green: 0.58, blue: 1.0, alpha: 1),   // 2 left btn3 blue
+        UIColor(red: 0.62, green: 0.24, blue: 0.72, alpha: 1),  // 3 left side (purple)
+        UIColor(red: 0.55, green: 0.08, blue: 0.14, alpha: 1),  // 4 left menu (maroon)
+        UIColor(red: 1.0, green: 0.34, blue: 0.34, alpha: 1),   // 5 right btn1 red
+        UIColor(red: 0.36, green: 0.88, blue: 0.44, alpha: 1),  // 6 right btn2 green
+        UIColor(red: 0.35, green: 0.58, blue: 1.0, alpha: 1),   // 7 right btn3 blue
+        UIColor(red: 0.62, green: 0.24, blue: 0.72, alpha: 1),  // 8 right side (purple)
+        UIColor(red: 0.95, green: 0.8, blue: 0.25, alpha: 1)    // 9 right menu (gold)
     ]
     private let extraTitles = ["TEST", "SERVICE", "COIN", "CARD"]
 
@@ -98,10 +105,11 @@ final class GekiPadView: UIView {
 
         for i in 0..<10 {
             let b = UIButton(type: .custom)
-            b.setTitle(gameLabels[i], for: .normal)
-            b.titleLabel?.font = UIFont.systemFont(ofSize: i % 5 >= 3 ? 13 : 22, weight: .bold)
+            let isSideOrMenu = i % 5 >= 3
+            b.setTitle(isSideOrMenu ? "" : gameLabels[i], for: .normal)
+            b.titleLabel?.font = UIFont.systemFont(ofSize: 22, weight: .bold)
             b.setTitleColor(.black, for: .normal)
-            b.backgroundColor = gameColors[i % 5]
+            b.backgroundColor = gameColors[i]
             b.isUserInteractionEnabled = false
             addSubview(b)
             gameButtonViews.append(b)
@@ -262,26 +270,47 @@ final class GekiPadView: UIView {
         CATransaction.commit()
 
         let margin: CGFloat = 10
-        let leverH: CGFloat = max(64, safe.height * 0.16)
-        leverRect = CGRect(x: safe.minX + 160, y: safe.maxY - leverH - margin, width: safe.width - 320, height: leverH)
-
-        let clusterW: CGFloat = 84
-        let btnH: CGFloat = (safe.height - leverH - margin * 3) / 4
-        let leftX = safe.minX + margin
-        let rightX = safe.maxX - margin - clusterW
         var left = [0, 1, 2, 3, 4], right = [5, 6, 7, 8, 9]
         if settings.leftHanded { swap(&left, &right) }
-        placeCluster(indices: left, x: leftX, w: clusterW, top: safe.minY + margin, h: btnH, gap: margin, side: true)
-        placeCluster(indices: right, x: rightX, w: clusterW, top: safe.minY + margin, h: btnH, gap: margin, side: true)
 
-        let uw: CGFloat = 84, uh: CGFloat = 36
+        // SIDE buttons: tall bars at the very outer edges of the screen.
+        let sideW = max(48, safe.width * 0.05)
+        let sideInsetY = safe.height * 0.08
+        let leftSideF = CGRect(x: safe.minX, y: safe.minY + sideInsetY, width: sideW, height: safe.height - sideInsetY * 2)
+        let rightSideF = CGRect(x: safe.maxX - sideW, y: safe.minY + sideInsetY, width: sideW, height: safe.height - sideInsetY * 2)
+        place(left[3], leftSideF, radius: 6)
+        place(right[3], rightSideF, radius: 6)
+
+        // The lever + its two MENU buttons sit in a band in the upper-middle area, between the side bars.
+        let midLeft = safe.minX + sideW + margin
+        let midRight = safe.maxX - sideW - margin
+        let midWidth = midRight - midLeft
+        let leverBandH = max(44, safe.height * 0.075)
+        let leverBandY = safe.minY + safe.height * 0.22
+        let menuW = max(44, midWidth * 0.07)
+        let leftMenuF = CGRect(x: midLeft, y: leverBandY, width: menuW, height: leverBandH)
+        let rightMenuF = CGRect(x: midRight - menuW, y: leverBandY, width: menuW, height: leverBandH)
+        place(left[4], leftMenuF, radius: 8)
+        place(right[4], rightMenuF, radius: 8)
+        leverRect = CGRect(x: leftMenuF.maxX + margin, y: leverBandY, width: rightMenuF.minX - leftMenuF.maxX - margin * 2, height: leverBandH)
+
+        // The two 1/2/3 button rows sit near the bottom, each a horizontal row, with a gap between the clusters.
+        let rowH = max(80, safe.height * 0.165)
+        let rowY = safe.minY + safe.height * 0.64
+        let clusterW = midWidth * 0.30
+        placeRow(indices: [left[0], left[1], left[2]], x: midLeft, w: clusterW, y: rowY, h: rowH, gap: margin)
+        placeRow(indices: [right[0], right[1], right[2]], x: midRight - clusterW, w: clusterW, y: rowY, h: rowH, gap: margin)
+
+        // Small utility buttons along the very top, between the side bars, above the lever band.
+        let uw: CGFloat = 84, uh: CGFloat = 34
+        let utilY = safe.minY + margin
         for i in 0..<4 {
-            let f = CGRect(x: safe.midX - (uw * 4 + margin * 3) / 2 + CGFloat(i) * (uw + margin), y: safe.minY + margin, width: uw, height: uh)
+            let f = CGRect(x: safe.midX - (uw * 4 + margin * 3) / 2 + CGFloat(i) * (uw + margin), y: utilY, width: uw, height: uh)
             extraFrames[i] = f
             extraButtonViews[i].frame = f
         }
-        toggleLabel.frame = CGRect(x: safe.midX - uw - margin / 2, y: safe.minY + margin + uh + 8, width: uw, height: uh)
-        settingsLabel.frame = CGRect(x: safe.midX + margin / 2, y: safe.minY + margin + uh + 8, width: uw, height: uh)
+        toggleLabel.frame = CGRect(x: safe.midX - uw - margin / 2, y: utilY + uh + 6, width: uw, height: uh)
+        settingsLabel.frame = CGRect(x: safe.midX + margin / 2, y: utilY + uh + 6, width: uw, height: uh)
         toggleFrame = toggleLabel.frame.insetBy(dx: -4, dy: -4)
         settingsFrame = settingsLabel.frame.insetBy(dx: -4, dy: -4)
 
@@ -292,27 +321,21 @@ final class GekiPadView: UIView {
 
         let maxW = max(safe.width - 20, 100)
         let fit = statusLabel.sizeThatFits(CGSize(width: maxW, height: .greatestFiniteMagnitude))
-        statusLabel.frame = CGRect(x: safe.minX + 10, y: safe.maxY - leverH - fit.height - margin - 4, width: fit.width, height: fit.height)
+        statusLabel.frame = CGRect(x: safe.minX + 10, y: safe.maxY - fit.height - margin, width: fit.width, height: fit.height)
     }
 
-    private func placeCluster(indices: [Int], x: CGFloat, w: CGFloat, top: CGFloat, h: CGFloat, gap: CGFloat, side: Bool) {
-        // order within a cluster: menu (small, top), 1/2/3 (big, colored), side (wide, bottom)
-        let menuH: CGFloat = 34
-        var y = top
-        let menuF = CGRect(x: x, y: y, width: w, height: menuH)
-        gameButtonFrames[indices[4]] = menuF; gameButtonViews[indices[4]].frame = menuF
-        y += menuH + gap
-        for k in 0..<3 {
-            let f = CGRect(x: x, y: y, width: w, height: h)
-            gameButtonFrames[indices[k]] = f
-            gameButtonViews[indices[k]].frame = f
-            gameButtonViews[indices[k]].layer.cornerRadius = w / 2
-            y += h + gap
+    private func place(_ index: Int, _ frame: CGRect, radius: CGFloat) {
+        gameButtonFrames[index] = frame
+        gameButtonViews[index].frame = frame
+        gameButtonViews[index].layer.cornerRadius = radius
+    }
+
+    private func placeRow(indices: [Int], x: CGFloat, w: CGFloat, y: CGFloat, h: CGFloat, gap: CGFloat) {
+        let bw = (w - gap * 2) / 3
+        for (k, idx) in indices.enumerated() {
+            let f = CGRect(x: x + CGFloat(k) * (bw + gap), y: y, width: bw, height: h)
+            place(idx, f, radius: 10)
         }
-        let sideF = CGRect(x: x, y: y, width: w, height: h * 0.8)
-        gameButtonFrames[indices[3]] = sideF; gameButtonViews[indices[3]].frame = sideF
-        gameButtonViews[indices[3]].layer.cornerRadius = 10
-        gameButtonViews[indices[4]].layer.cornerRadius = 8
     }
 
     private func layoutLever() {
@@ -330,7 +353,7 @@ final class GekiPadView: UIView {
         let op = CGFloat(settings.controlsOpacity)
         let glow = CGFloat(settings.glowOpacity)
         for i in 0..<10 {
-            let base = gameColors[i % 5]
+            let base = gameColors[i]
             gameButtonViews[i].backgroundColor = base.withAlphaComponent(gameOn[i] ? glow : op)
         }
         for i in 0..<4 {
